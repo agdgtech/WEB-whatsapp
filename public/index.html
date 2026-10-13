@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WA Marketing</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Login -->
+  <section id="login-view" class="login hidden">
+    <form id="login-form" class="card login-card">
+      <h1>WA Marketing</h1>
+      <p class="muted">Sign in to your dashboard</p>
+      <label>Username <input name="username" required autocomplete="username" /></label>
+      <label>Password <input name="password" type="password" required autocomplete="current-password" /></label>
+      <button class="btn primary">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <div id="app-view" class="layout hidden">
+    <nav class="sidebar">
+      <div class="brand">WA Marketing</div>
+      <a data-tab="dashboard" class="active">Dashboard</a>
+      <a data-tab="sessions">WhatsApp Numbers</a>
+      <a data-tab="send">Send Message</a>
+      <a data-tab="contacts">Contacts</a>
+      <a data-tab="campaigns">Campaigns</a>
+      <a data-tab="logs">Message Logs</a>
+      <a data-tab="keys">API Keys</a>
+      <a data-tab="docs">API Docs</a>
+      <a id="logout-btn" class="logout">Log out</a>
+    </nav>
+
+    <main>
+      <!-- Dashboard -->
+      <section data-panel="dashboard">
+        <h2>Dashboard</h2>
+        <div id="stats" class="stats"></div>
+      </section>
+
+      <!-- Sessions -->
+      <section data-panel="sessions" class="hidden">
+        <h2>WhatsApp Numbers</h2>
+        <form id="session-form" class="card row">
+          <input name="id" placeholder="Session name, e.g. sales-1" pattern="[a-zA-Z0-9_\-]{1,40}" required />
+          <button class="btn primary">Add number &amp; show QR</button>
+        </form>
+        <p class="muted">Open WhatsApp on your phone → Settings → Linked devices → Link a device, then scan the QR.</p>
+        <div id="sessions" class="grid"></div>
+      </section>
+
+      <!-- Send -->
+      <section data-panel="send" class="hidden">
+        <h2>Send Message</h2>
+        <form id="send-form" class="card stack">
+          <label>From number <select name="sessionId" class="session-select" required></select></label>
+          <label>To (with country code, e.g. 919876543210) <input name="to" required /></label>
+          <label>Message / caption <textarea name="text" rows="4"></textarea></label>
+          <label>Attachment (optional) <input name="file" type="file" /></label>
+          <button class="btn primary">Send</button>
+          <p id="send-result"></p>
+        </form>
+      </section>
+
+      <!-- Contacts -->
+      <section data-panel="contacts" class="hidden">
+        <h2>Contacts</h2>
+        <div class="two-col">
+          <form id="contact-form" class="card stack">
+            <h3>Add contact</h3>
+            <input name="phone" placeholder="Phone with country code" required />
+            <input name="name" placeholder="Name" />
+            <input name="tags" placeholder="Tags (comma separated)" />
+            <button class="btn primary">Save</button>
+          </form>
+          <form id="import-form" class="card stack">
+            <h3>Import CSV</h3>
+            <p class="muted">Columns: <code>phone,name,tags</code> (tags separated by <code>;</code>)</p>
+            <input name="file" type="file" accept=".csv,text/csv" required />
+            <input name="tags" placeholder="Extra tag for all imported contacts (optional)" />
+            <button class="btn primary">Import</button>
+            <p id="import-result"></p>
+          </form>
+        </div>
+        <div class="card">
+          <div class="row"><input id="contact-search" placeholder="Search name / phone" /></div>
+          <table><thead><tr><th>Phone</th><th>Name</th><th>Tags</th><th>Status</th><th></th></tr></thead>
+            <tbody id="contacts"></tbody></table>
+        </div>
+      </section>
+
+      <!-- Campaigns -->
+      <section data-panel="campaigns" class="hidden">
+        <h2>Campaigns</h2>
+        <form id="campaign-form" class="card stack">
+          <h3>New campaign</h3>
+          <input name="name" placeholder="Campaign name" required />
+          <label>Send from <select name="sessionId" class="session-select" required></select></label>
+          <input name="tags" placeholder="Audience tags (comma separated, empty = all contacts)" />
+          <textarea name="message" rows="5" required placeholder="Hi {{name}}, {check out|don't miss} our Diwali offer! Reply STOP to unsubscribe."></textarea>
+          <p class="muted">Variables: <code>{{name}}</code> <code>{{phone}}</code> · Spintax: <code>{Hi|Hello|Hey}</code> · Always include an opt-out line.</p>
+          <input name="mediaUrl" placeholder="Image / video / PDF URL (optional)" />
+          <label class="check"><input type="checkbox" name="startNow" /> Start immediately</label>
+          <button class="btn primary">Create campaign</button>
+        </form>
+        <div class="card">
+          <table><thead><tr><th>Name</th><th>From</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+            <tbody id="campaigns"></tbody></table>
+        </div>
+      </section>
+
+      <!-- Logs -->
+      <section data-panel="logs" class="hidden">
+        <h2>Message Logs</h2>
+        <form id="log-filters" class="card filters">
+          <input name="q" placeholder="Search number or text" />
+          <select name="sessionId"><option value="">All numbers</option></select>
+          <select name="direction">
+            <option value="">In &amp; out</option>
+            <option value="out">Outgoing</option>
+            <option value="in">Incoming</option>
+          </select>
+          <select name="status">
+            <option value="">Any status</option>
+            <option value="sent">Sent</option>
+            <option value="failed">Failed</option>
+            <option value="received">Received</option>
+          </select>
+          <select name="campaignId"><option value="">All messages</option></select>
+          <label>From <input name="from" type="date" /></label>
+          <label>To <input name="to" type="date" /></label>
+          <select name="limit">
+            <option value="100">Last 100</option>
+            <option value="300" selected>Last 300</option>
+            <option value="1000">Last 1000</option>
+          </select>
+          <button type="button" id="log-reset" class="btn">Reset</button>
+          <span id="log-count" class="muted"></span>
+        </form>
+        <div class="card">
+          <table><thead><tr><th>Time</th><th>Number</th><th>Dir</th><th>Contact</th><th>Message</th><th>Status</th></tr></thead>
+            <tbody id="logs"></tbody></table>
+        </div>
+      </section>
+
+      <!-- API keys -->
+      <section data-panel="keys" class="hidden">
+        <h2>API Keys</h2>
+        <form id="key-form" class="card row">
+          <input name="name" placeholder="Key name, e.g. CRM integration" required />
+          <button class="btn primary">Generate key</button>
+        </form>
+        <div id="new-key" class="card hidden"></div>
+        <div class="card">
+          <table><thead><tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr></thead>
+            <tbody id="keys"></tbody></table>
+        </div>
+      </section>
+
+      <!-- Docs -->
+      <section data-panel="docs" class="hidden">
+        <h2>API Docs</h2>
+        <div class="card docs">
+          <p>Base URL: <code id="base-url"></code> · Auth header: <code>x-api-key: wak_...</code></p>
+          <h3>Send text</h3>
+<pre>POST /api/messages/text
+{ "sessionId": "sales-1", "to": "919876543210", "text": "Hello!" }</pre>
+          <h3>Send media</h3>
+<pre>POST /api/messages/media
+{ "sessionId": "sales-1", "to": "919876543210",
+  "mediaUrl": "https://example.com/offer.jpg", "caption": "Offer" }
+# or multipart/form-data with fields sessionId, to, caption + file</pre>
+          <h3>Check number</h3>
+<pre>GET /api/check/:sessionId/:phone   →  { "exists": true }</pre>
+          <h3>Sessions</h3>
+<pre>GET    /api/sessions
+POST   /api/sessions            { "id": "sales-1" }
+GET    /api/sessions/:id/qr     (?format=image for PNG)
+DELETE /api/sessions/:id        (?logout=true to unlink device)</pre>
+          <h3>Contacts</h3>
+<pre>GET    /api/contacts?tag=vip&amp;q=rahul
+POST   /api/contacts            { "phone": "...", "name": "...", "tags": ["vip"] }  (or an array)
+POST   /api/contacts/import     multipart "file" (CSV: phone,name,tags)
+PATCH  /api/contacts/:id        { "optedOut": true }
+DELETE /api/contacts/:id</pre>
+          <h3>Campaigns</h3>
+<pre>POST /api/campaigns
+{ "name": "Diwali", "sessionId": "sales-1", "tags": ["vip"],
+  "message": "Hi {{name}} ... Reply STOP to unsubscribe", "mediaUrl": null, "startNow": true }
+# or "phones": ["9198...", ...] instead of tags
+GET  /api/campaigns   |   GET /api/campaigns/:id
+POST /api/campaigns/:id/start   |   POST /api/campaigns/:id/pause</pre>
+          <h3>Logs &amp; stats</h3>
+<pre>GET /api/messages?sessionId=&amp;campaignId=&amp;direction=in|out&amp;status=sent|failed|received
+                 &amp;q=&lt;number or text&gt;&amp;from=&lt;ISO date&gt;&amp;to=&lt;ISO date&gt;&amp;limit=200
+→ { "total": 1234, "messages": [ ... newest first ] }
+GET /api/stats</pre>
+          <h3>Webhook (set WEBHOOK_URL in .env)</h3>
+<pre>POST &lt;WEBHOOK_URL&gt;
+{ "event": "message.received" | "session.connected" | "session.logged_out"
+           | "contact.opted_out" | "campaign.completed",
+  "data": { ... }, "timestamp": "..." }</pre>
+          <h3>cURL example</h3>
+<pre id="curl-example"></pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

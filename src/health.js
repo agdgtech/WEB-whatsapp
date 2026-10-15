@@ -59,7 +59,7 @@ export function sessionHealth(sessionId) {
   const all = db.messages.filter((m) => m.sessionId === sessionId);
   const recent = all.filter((m) => new Date(m.createdAt).getTime() >= since);
   // "marketing" sends = outbound messages that aren't replies inside a support ticket
-  const outbound = recent.filter((m) => m.direction !== 'in' && !m.ticketId);
+  const outbound = recent.filter((m) => m.direction !== 'in' && !m.ticketId && !m.flowId);
   const sent = outbound.filter((m) => m.status === 'sent');
   const failed = outbound.filter((m) => m.status === 'failed');
   const inbound = recent.filter((m) => m.direction === 'in');

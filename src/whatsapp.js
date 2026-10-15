@@ -18,6 +18,7 @@ import { emitWebhook } from './webhook.js';
 import { handleIncoming } from './tickets.js';
 import { textOptions, nativeFlowButtons, rememberMenu, resolveChoice } from './buttons.js';
 import { sessionMeta } from './health.js';
+import { handleFlowMessage } from './flows.js';
 
 const SESSIONS_DIR = path.resolve('sessions');
 const OPT_OUT_WORDS = ['stop', 'unsubscribe', 'optout', 'opt out', 'cancel'];
@@ -134,8 +135,12 @@ export async function startSession(id) {
         sessionId: id, from: phone, text, pushName: m.pushName,
         button: choice ? { id: choice.id, title: choice.title } : null, raw: m,
       });
-      handleIncoming(id, phone, text, m.pushName, { autoReply: choice?.reply })
-        .catch((e) => console.error('Ticket error:', e.message));
+      // a chatbot flow gets the message first; if no flow handles it, it goes to tickets
+      (async () => {
+        const handled = await handleFlowMessage(id, phone, { text: raw, buttonId, pushName: m.pushName })
+          .catch((e) => { console.error('Flow error:', e.message); return false; });
+        if (!handled) await handleIncoming(id, phone, text, m.pushName, { autoReply: choice?.reply });
+      })().catch((e) => console.error('Ticket error:', e.message));
     }
   });
 

@@ -22,6 +22,13 @@
       <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></symbol>
       <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14 9l2 2"/></symbol>
       <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></symbol>
+      <symbol id="i-flow" viewBox="0 0 24 24"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="15" width="6" height="6" rx="1.5"/><path d="M9 6h4a2 2 0 0 1 2 2v7"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m6 4 14 8-14 8z"/></symbol>
+      <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+      <symbol id="i-split" viewBox="0 0 24 24"><path d="M6 3v6a6 6 0 0 0 6 6h6M18 15l-3-3M18 15l-3 3M6 21v-6"/></symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></symbol>
       <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
@@ -52,6 +59,7 @@
       <a data-tab="send" data-roles="admin,manager"><svg class="ic"><use href="#i-send"/></svg>Send Message</a>
       <a data-tab="contacts" data-roles="admin,manager"><svg class="ic"><use href="#i-users"/></svg>Contacts</a>
       <a data-tab="campaigns" data-roles="admin,manager"><svg class="ic"><use href="#i-megaphone"/></svg>Campaigns</a>
+      <a data-tab="flows" data-roles="admin,manager"><svg class="ic"><use href="#i-flow"/></svg>Chatbot Flows</a>
       <a data-tab="logs" data-roles="admin,manager"><svg class="ic"><use href="#i-list"/></svg>Message Logs</a>
       <div class="nav-section" data-roles="admin">Admin</div>
       <a data-tab="sessions" data-roles="admin"><svg class="ic"><use href="#i-phone"/></svg>WhatsApp Numbers</a>
@@ -222,6 +230,67 @@
           <div class="ticket-detail card" id="ticket-detail">
             <p class="muted empty">Select a ticket to view the conversation.</p>
           </div>
+        </div>
+      </section>
+
+      <!-- Chatbot flows -->
+      <section data-panel="flows" class="hidden flows">
+        <div id="flows-list-view">
+          <div class="dash-head">
+            <div>
+              <h2>Chatbot Flows</h2>
+              <p class="muted">Automate WhatsApp conversations: greet customers, answer common questions, collect details and hand over to your team.</p>
+            </div>
+            <button class="btn primary" id="flow-new-btn">+ New flow</button>
+          </div>
+          <div id="flow-templates" class="tpl-grid hidden"></div>
+          <div class="card">
+            <table>
+              <thead><tr><th>Flow</th><th>Starts when</th><th>Numbers</th><th class="n">Started</th><th class="n">Finished</th><th class="n">Handed over</th><th>Live</th><th></th></tr></thead>
+              <tbody id="flows"></tbody>
+            </table>
+          </div>
+          <div class="card how-flows">
+            <h3>How flows work</h3>
+            <ul>
+              <li><strong>Keyword</strong> flows start when a message contains a keyword, even during a chat with your team.</li>
+              <li><strong>First message</strong> and <strong>Any message</strong> flows don't start while the customer has an open ticket, so they never interrupt your team.</li>
+              <li>While a flow is running, the customer's replies go to the bot instead of creating tickets. <strong>Hand to a person</strong> creates a ticket with everything the bot collected.</li>
+              <li>Answers to questions are saved on the contact. You can use them in later messages and campaigns, e.g. <code>{{email}}</code>.</li>
+              <li>Replying STOP always ends the flow and unsubscribes the contact.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div id="flow-editor" class="flow-editor hidden">
+          <div class="fe-top">
+            <button class="btn sm ghost" id="fe-back">← All flows</button>
+            <input id="fe-name" class="fe-name" aria-label="Flow name" />
+            <span id="fe-status" class="muted small"></span>
+            <div class="fe-top-right">
+              <label class="live-toggle"><label class="switch"><input type="checkbox" id="fe-active" /><span></span></label> Live</label>
+              <button class="btn" id="fe-test"><svg class="ic"><use href="#i-play"/></svg> Test</button>
+              <button class="btn primary" id="fe-save">Save</button>
+            </div>
+          </div>
+          <div class="fe-body">
+            <div class="fe-palette" id="fe-palette" aria-label="Add a step"></div>
+            <div class="fe-canvas" id="fe-canvas">
+              <div class="fe-world" id="fe-world">
+                <svg class="fe-edges" id="fe-edges"></svg>
+                <div id="fe-nodes"></div>
+              </div>
+              <div class="fe-zoom">
+                <button class="btn sm" id="fe-zoom-out" title="Zoom out">−</button>
+                <button class="btn sm" id="fe-zoom-fit" title="Fit to screen">Fit</button>
+                <button class="btn sm" id="fe-zoom-in" title="Zoom in">+</button>
+              </div>
+              <div class="fe-hint muted small">Drag steps to move · drag from a ● to connect · click a line to remove it · Delete removes the selected step</div>
+              <div class="fe-add-menu hidden" id="fe-add-menu"></div>
+            </div>
+            <div class="fe-side" id="fe-side"></div>
+          </div>
+          <div class="fe-issues" id="fe-issues"></div>
         </div>
       </section>
 

@@ -10,11 +10,12 @@ const running = new Map(); // campaignId -> { cancel: bool }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (min, max) => Math.floor(min + Math.random() * (max - min));
 
-// {{name}}, {{phone}} and spintax {Hi|Hello|Hey}
+// {{name}}, {{phone}}, saved contact fields like {{email}} (e.g. collected by a chatbot), and spintax {Hi|Hello|Hey}
 export function renderTemplate(tpl, contact) {
   return tpl
     .replace(/\{\{\s*name\s*\}\}/gi, contact.name || 'there')
     .replace(/\{\{\s*phone\s*\}\}/gi, contact.phone)
+    .replace(/\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}/gi, (_, k) => contact.fields?.[k] ?? '')
     .replace(/\{([^{}]+\|[^{}]+)\}/g, (_, opts) => {
       const parts = opts.split('|');
       return parts[Math.floor(Math.random() * parts.length)];

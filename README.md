@@ -22,6 +22,11 @@ WhatsApp Web QR code (no Meta Business API account needed). Built on Node.js, Ex
 - **Multi-user with departments**: admin / manager / agent roles; departments (Sales, Support…) get
   tickets by WhatsApp number or keywords, with optional auto-assign to the least busy member and
   transfers between departments. Agents only see their own departments' tickets.
+- **Chatbot flow builder**: drag-and-drop canvas to build automated conversations (messages, menus/
+  buttons, questions with validation, conditions, actions, waits, hand-over to a department, end),
+  triggered by keyword / first message / any message. Answers are saved on the contact, hand-over
+  creates a ticket with everything collected, and a built-in test chat runs the flow without sending
+  anything. Templates: welcome menu, lead capture, feedback survey (`src/flows.js`)
 - **Block Risk screen** (admin): a 0–100 risk score per number from reply rate, opt-outs, invalid
   numbers, volume vs number age, cold messaging, identical text, speed, logouts, night sending and
   links, with a fix for each. Protection settings that campaigns obey: delays, daily limit, warm-up

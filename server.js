@@ -7,6 +7,7 @@ import { pauseInterruptedCampaigns } from './src/campaigns.js';
 import { ensureAdminUser } from './src/auth.js';
 import { migrateTickets } from './src/departments.js';
 import { pruneMenus } from './src/buttons.js';
+import { startFlowTimers } from './src/flows.js';
 
 ensureAdminUser();
 migrateTickets();
@@ -22,5 +23,6 @@ const port = Number(process.env.PORT || 3000);
 app.listen(port, async () => {
   console.log(`WA Marketing running at http://localhost:${port}`);
   pauseInterruptedCampaigns();
+  startFlowTimers();
   await restoreSessions();
 });

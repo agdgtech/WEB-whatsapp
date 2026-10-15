@@ -16,6 +16,9 @@ import {
 import { findDepartment, findUser } from './departments.js';
 import { dashboard } from './analytics.js';
 import { healthReport, sessionMeta } from './health.js';
+import {
+  createFlow, updateFlow, deleteFlow, duplicateFlow, findFlow, validateFlow, simulate, TEMPLATE_LIST,
+} from './flows.js';
 import { getSettings, updateSettings, RECOMMENDED } from './settings.js';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } });
@@ -436,6 +439,26 @@ r.delete('/tickets/:id', STAFF, h((req) => {
   const ticket = getTicketFor(req.user, req.params.id);
   db.tickets = db.tickets.filter((t) => t !== ticket);
   save();
+}));
+
+/* ---------- Chatbot flows (admins and managers) ---------- */
+r.use('/flows', STAFF);
+r.get('/flows', h(() => db.flows.map(({ nodes, ...f }) => ({ ...f, steps: Object.keys(nodes).length - 1 })).reverse()));
+r.get('/flows/templates', h(() => TEMPLATE_LIST));
+r.get('/flows/:id', h((req) => {
+  const f = findFlow(req.params.id);
+  if (!f) throw notFound('Flow');
+  return { flow: f, issues: validateFlow(f) };
+}));
+r.post('/flows', h((req) => createFlow(req.body || {}, req.user)));
+r.put('/flows/:id', h((req) => updateFlow(req.params.id, req.body || {})));
+r.post('/flows/:id/duplicate', h((req) => duplicateFlow(req.params.id, req.user)));
+r.delete('/flows/:id', h((req) => deleteFlow(req.params.id)));
+// Test chat: runs the (possibly unsaved) flow without sending anything
+r.post('/flows/simulate', h((req) => {
+  const { flow, state, input } = req.body || {};
+  if (!flow?.nodes) throw bad('flow is required');
+  return simulate(flow, state, input);
 }));
 
 /* ---------- Block risk & protection settings (admin) ---------- */

@@ -20,6 +20,9 @@ const empty = () => ({
   menus: {},       // "<sessionId>:<phone>" -> last button menu sent { buttons, campaignId, sentAt }
   settings: null,  // anti-block protection settings (src/settings.js)
   sessionMeta: {}, // sessionId -> { firstSeenAt, numberSince, events: [{ type, at }] }
+  flows: [],       // chatbot flows (src/flows.js)
+  flowRuns: {},    // "<sessionId>:<phone>" -> active chatbot conversation
+  flowLast: {},    // "<sessionId>:<phone>:<flowId>" -> when that flow last ended (cooldown)
 });
 
 fs.mkdirSync(DATA_DIR, { recursive: true });

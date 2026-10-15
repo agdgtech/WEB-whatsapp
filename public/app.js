@@ -105,6 +105,7 @@ async function refresh(tab) {
     loadTicketBadge();
     loadRiskBadge();
     if (tab === 'risk') await loadRisk();
+    if (tab === 'flows') await loadFlows();
     if (tab === 'send' || tab === 'campaigns' || tab === 'tickets' || tab === 'departments') await loadSessionSelects();
     if (tab === 'tickets') await loadTickets();
     if (tab === 'users') await loadUsers();
@@ -669,6 +670,629 @@ $('#new-ticket-form').addEventListener('submit', async (e) => {
     renderedTicketAt = null;
     loadTickets();
   } catch (err) { alert(err.message); }
+});
+
+/* ---------- Chatbot flows ---------- */
+const NODE_META = {
+  start: { label: 'Start', icon: 'i-play', color: '#128c7e' },
+  message: { label: 'Send message', icon: 'i-chat', color: '#2a78d6' },
+  menu: { label: 'Menu / buttons', icon: 'i-list', color: '#6250d6' },
+  question: { label: 'Ask a question', icon: 'i-help', color: '#eb6834' },
+  condition: { label: 'Condition', icon: 'i-split', color: '#c98500' },
+  action: { label: 'Action', icon: 'i-zap', color: '#1baf7a' },
+  delay: { label: 'Wait', icon: 'i-clock', color: '#7a7f7c' },
+  handoff: { label: 'Hand to a person', icon: 'i-user', color: '#d55181' },
+  end: { label: 'End', icon: 'i-stop', color: '#52514e' },
+};
+const PALETTE = ['message', 'menu', 'question', 'condition', 'action', 'delay', 'handoff', 'end'];
+const VALIDATE = { any: 'Any text', number: 'Number', email: 'Email', phone: 'Phone number', date: 'Date', yesno: 'Yes / No' };
+const OPERATORS = { equals: 'is', not_equals: 'is not', contains: 'contains (comma = any)', gt: 'is greater than', lt: 'is less than', exists: 'has a value', not_exists: 'is empty' };
+const ACTIONS = { add_tag: 'Add tag to contact', remove_tag: 'Remove tag', set_variable: 'Set a variable', opt_in: 'Mark contact as opted in', webhook: 'Send webhook to your system' };
+const TRIGGER_LABEL = { keyword: 'Message contains a keyword', first_message: "Customer's first message ever", any: 'Any message (when no ticket is open)' };
+const DEFAULTS = {
+  message: () => ({ text: '' }),
+  menu: () => ({ text: 'Please choose an option:', style: 'buttons', variable: 'choice',
+    options: [{ id: rid('o'), title: 'Option 1', next: null }, { id: rid('o'), title: 'Option 2', next: null }] }),
+  question: () => ({ text: '', variable: 'answer', validate: 'any' }),
+  condition: () => ({ variable: '', operator: 'equals', value: '' }),
+  action: () => ({ action: 'add_tag', value: '' }),
+  delay: () => ({ seconds: 60 }),
+  handoff: () => ({ text: 'Connecting you to our team. Someone will reply shortly.', priority: 'normal', departmentId: null, subject: '' }),
+  end: () => ({ text: '' }),
+};
+function rid(p) { return p + Math.random().toString(36).slice(2, 8); }
+
+let flowsList = [];
+let flowSessionIds = []; // WhatsApp numbers, for the flow settings
+let fe = null; // open editor: { flow, issues, selected, scale, tx, ty, dirty, mode, sim, drag }
+
+/* ----- list ----- */
+const triggerText = (f) => f.trigger.type === 'keyword'
+  ? `Keyword: ${(f.trigger.keywords || []).map((k) => `"${k}"`).join(', ') || '—'}` : TRIGGER_LABEL[f.trigger.type];
+
+async function loadFlows() {
+  if (fe) return; // editor is open
+  flowsList = await api('/flows');
+  $('#flows').innerHTML = flowsList.map((f) => `<tr>
+    <td><strong>${esc(f.name)}</strong><br><span class="muted small">${esc(f.description || `${f.steps} steps`)}</span></td>
+    <td class="small">${esc(triggerText(f))}</td>
+    <td class="small">${f.sessionIds?.length ? f.sessionIds.map(esc).join(', ') : 'All numbers'}</td>
+    <td class="n">${f.stats.started}</td><td class="n">${f.stats.completed}</td><td class="n">${f.stats.handoffs}</td>
+    <td><label class="switch"><input type="checkbox" data-live="${f.id}" ${f.active ? 'checked' : ''} aria-label="Live"><span></span></label></td>
+    <td style="white-space:nowrap"><button class="btn sm" data-edit="${f.id}">Edit</button>
+      <button class="btn sm" data-dup="${f.id}">Duplicate</button>
+      <button class="btn sm danger" data-del="${f.id}">Delete</button></td></tr>`).join('')
+    || '<tr><td colspan="8" class="empty-state">No flows yet. Click "+ New flow" and start from a template.</td></tr>';
+}
+
+$('#flow-new-btn').addEventListener('click', async () => {
+  const box = $('#flow-templates');
+  if (box.classList.toggle('hidden')) return;
+  const tpls = await api('/flows/templates');
+  box.innerHTML = tpls.map((t) => `<button class="tpl" data-tpl="${t.id}"><strong>${esc(t.name)}</strong><span>${esc(t.description)}</span></button>`).join('');
+});
+$('#flow-templates').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-tpl]');
+  if (!b) return;
+  const { flow } = await api('/flows', { method: 'POST', body: { template: b.dataset.tpl } });
+  $('#flow-templates').classList.add('hidden');
+  openFlowEditor(flow.id);
+});
+$('#flows').addEventListener('click', async (e) => {
+  const { edit, dup, del } = e.target.dataset;
+  try {
+    if (edit) openFlowEditor(edit);
+    if (dup) { await api(`/flows/${dup}/duplicate`, { method: 'POST' }); loadFlows(); }
+    if (del && confirm('Delete this flow? Conversations running in it will stop.')) { await api(`/flows/${del}`, { method: 'DELETE' }); loadFlows(); }
+  } catch (err) { alert(err.message); }
+});
+$('#flows').addEventListener('change', async (e) => {
+  const id = e.target.dataset.live;
+  if (!id) return;
+  try { await api(`/flows/${id}`, { method: 'PUT', body: { active: e.target.checked } }); }
+  catch (err) { alert(err.message); }
+  loadFlows();
+});
+
+/* ----- editor: open / close / save ----- */
+async function openFlowEditor(id) {
+  const [{ flow, issues }, sessions] = await Promise.all([api(`/flows/${id}`), api('/sessions')]);
+  flowSessionIds = sessions.map((s) => s.id);
+  fe = { flow, issues, selected: null, scale: 1, tx: 0, ty: 0, dirty: false, mode: 'props', sim: null, drag: null };
+  $('#flows-list-view').classList.add('hidden');
+  $('#flow-editor').classList.remove('hidden');
+  $('#fe-name').value = flow.name;
+  $('#fe-active').checked = flow.active;
+  setFeStatus();
+  renderPalette();
+  renderCanvas();
+  renderSide();
+  renderIssues();
+  requestAnimationFrame(() => { fitFlow(); drawEdges(); });
+}
+function closeFlowEditor() {
+  if (fe?.dirty && !confirm('You have unsaved changes. Leave without saving?')) return;
+  fe = null;
+  $('#flow-editor').classList.add('hidden');
+  $('#flows-list-view').classList.remove('hidden');
+  loadFlows();
+}
+function markDirty() { fe.dirty = true; setFeStatus(); }
+function setFeStatus(text) {
+  $('#fe-status').textContent = text || (fe.dirty ? 'Unsaved changes' : fe.flow.active ? 'Live' : 'Draft (not live)');
+}
+$('#fe-back').addEventListener('click', closeFlowEditor);
+$('#fe-name').addEventListener('input', (e) => { fe.flow.name = e.target.value; markDirty(); });
+window.addEventListener('beforeunload', (e) => { if (fe?.dirty) e.preventDefault(); });
+
+async function saveFlow(extra = {}) {
+  const f = fe.flow;
+  const res = await api(`/flows/${f.id}`, { method: 'PUT', body: {
+    name: f.name, description: f.description, trigger: f.trigger, sessionIds: f.sessionIds,
+    timeoutMinutes: f.timeoutMinutes, cooldownMinutes: f.cooldownMinutes, nodes: f.nodes, ...extra,
+  } });
+  fe.flow = res.flow;
+  fe.issues = res.issues;
+  fe.dirty = false;
+  $('#fe-active').checked = res.flow.active;
+  renderCanvas();
+  renderIssues();
+  setFeStatus(res.issues.errors.length ? 'Saved — fix the errors below to go live' : 'Saved ✓');
+}
+$('#fe-save').addEventListener('click', () => saveFlow().catch((err) => alert(err.message)));
+$('#fe-active').addEventListener('change', async (e) => {
+  try { await saveFlow({ active: e.target.checked }); }
+  catch (err) { e.target.checked = !e.target.checked; alert(err.message); }
+});
+$('#fe-test').addEventListener('click', () => {
+  fe.mode = 'test';
+  fe.sim = { state: null, log: [], waitingFor: null };
+  renderSide();
+});
+
+function renderIssues() {
+  const { errors = [], warnings = [] } = fe.issues || {};
+  $('#fe-issues').innerHTML = !errors.length && !warnings.length ? '<span class="ok">✓ No problems found</span>'
+    : [...errors.map((x) => `<div class="err">✕ ${esc(x)}</div>`), ...warnings.map((x) => `<div class="warn">⚠ ${esc(x)}</div>`)].join('');
+}
+
+/* ----- graph helpers ----- */
+function outputs(n) {
+  switch (n.type) {
+    case 'start': return [{ key: 'next', label: 'Then' }];
+    case 'menu': return (n.options || []).map((o) => ({ key: `opt:${o.id}`, label: o.title || '(no title)' }));
+    case 'condition': return [{ key: 'yes', label: 'Yes', cls: 'yes' }, { key: 'no', label: 'No', cls: 'no' }];
+    case 'handoff': case 'end': return [];
+    default: return [{ key: 'next', label: 'Next' }];
+  }
+}
+const getTarget = (n, key) => (key.startsWith('opt:') ? n.options?.find((o) => o.id === key.slice(4))?.next : n[key]);
+function setTarget(n, key, id) {
+  if (key.startsWith('opt:')) { const o = n.options.find((x) => x.id === key.slice(4)); if (o) o.next = id || null; }
+  else n[key] = id || null;
+}
+const nodeName = (id) => { const n = fe.flow.nodes[id]; return n ? n.label || NODE_META[n.type].label : '?'; };
+const duration = (s) => (s % 3600 === 0 ? `${s / 3600} hour${s === 3600 ? '' : 's'}` : s % 60 === 0 ? `${s / 60} min` : `${s} sec`);
+function flowVars() {
+  const v = new Set(['name', 'phone', 'first_message']);
+  for (const n of Object.values(fe.flow.nodes)) {
+    if (n.type === 'question' && n.variable) v.add(n.variable);
+    if (n.type === 'menu') v.add(n.variable || 'choice');
+    if (n.type === 'action' && n.action === 'set_variable' && n.variable) v.add(n.variable);
+  }
+  return [...v];
+}
+function nodeSummary(n) {
+  switch (n.type) {
+    case 'start': return `When: ${triggerText(fe.flow)}`;
+    case 'message': return `${n.imageUrl ? '🖼 ' : ''}${n.text || ''}`;
+    case 'menu': return `${n.text || ''}${n.style === 'buttons' ? '' : '\n(numbered list)'}`;
+    case 'question': return `${n.text || ''}\n→ saves {{${n.variable || '?'}}} · ${VALIDATE[n.validate || 'any']}`;
+    case 'condition': return `If {{${n.variable || '?'}}} ${OPERATORS[n.operator]}${['exists', 'not_exists'].includes(n.operator) ? '' : ` "${n.value ?? ''}"`}`;
+    case 'action': return `${ACTIONS[n.action]}${n.value ? `: ${n.action === 'set_variable' ? `${n.variable} = ` : ''}${n.value}` : ''}`;
+    case 'delay': return `Wait ${duration(Number(n.seconds) || 0)}`;
+    case 'handoff': return `Ticket → ${n.departmentId ? deptName(n.departmentId) || '?' : 'routing rules'} · ${n.priority || 'normal'}${n.text ? `\n${n.text}` : ''}`;
+    case 'end': return n.text || 'End of conversation';
+    default: return '';
+  }
+}
+
+/* ----- canvas rendering ----- */
+function renderPalette() {
+  $('#fe-palette').innerHTML = '<div class="pal-title">Add a step</div>' + PALETTE.map((t) => `
+    <button class="pal-btn" data-add="${t}" style="--nc:${NODE_META[t].color}" title="${NODE_META[t].label}">
+      <span class="dot"><svg class="ic"><use href="#${NODE_META[t].icon}"/></svg></span><span>${NODE_META[t].label}</span></button>`).join('');
+}
+function renderCanvas() {
+  const nodes = fe.flow.nodes;
+  $('#fe-nodes').innerHTML = Object.entries(nodes).map(([id, n]) => {
+    const m = NODE_META[n.type] || NODE_META.message;
+    return `<div class="fnode ${fe.selected === id ? 'selected' : ''}" data-id="${id}" style="left:${n.x || 0}px;top:${n.y || 0}px;--nc:${m.color}">
+      ${n.type !== 'start' ? '<span class="port in"></span>' : ''}
+      <div class="fn-head"><span class="dot"><svg class="ic"><use href="#${m.icon}"/></svg></span><span class="t">${esc(n.label || m.label)}</span></div>
+      <div class="fn-body">${esc(nodeSummary(n))}</div>
+      ${outputs(n).length ? `<div class="fn-outs">${outputs(n).map((o) => `
+        <div class="fn-out"><span class="lbl">${esc(o.label)}</span><span class="port out ${getTarget(n, o.key) ? 'linked' : ''}" data-key="${esc(o.key)}" title="Drag to connect"></span></div>`).join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+  applyTransform();
+  drawEdges();
+}
+function applyTransform() {
+  $('#fe-world').style.transform = `translate(${fe.tx}px, ${fe.ty}px) scale(${fe.scale})`;
+}
+function curve(a, b) {
+  const dx = Math.max(40, Math.abs(b.x - a.x) / 2);
+  return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+}
+function portPos(el) {
+  const w = $('#fe-world').getBoundingClientRect(), r = el.getBoundingClientRect();
+  return { x: (r.left + r.width / 2 - w.left) / fe.scale, y: (r.top + r.height / 2 - w.top) / fe.scale };
+}
+function drawEdges(temp = '') {
+  if (!fe) return;
+  const out = [];
+  for (const el of $$('#fe-nodes .fnode')) {
+    const n = fe.flow.nodes[el.dataset.id];
+    for (const p of el.querySelectorAll('.port.out')) {
+      const to = getTarget(n, p.dataset.key);
+      const inEl = to && $(`#fe-nodes .fnode[data-id="${to}"] .port.in`);
+      if (!inEl) continue;
+      const d = curve(portPos(p), portPos(inEl));
+      const cls = p.dataset.key === 'yes' ? 'yes' : p.dataset.key === 'no' ? 'no' : '';
+      out.push(`<g data-from="${el.dataset.id}" data-key="${esc(p.dataset.key)}"><path class="edge-hit" d="${d}"/><path class="edge ${cls}" d="${d}" marker-end="url(#fe-arrow)"/></g>`);
+    }
+  }
+  $('#fe-edges').innerHTML = `<defs><marker id="fe-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9aa7a2"/></marker></defs>
+    <g transform="translate(5000 5000)">${out.join('')}${temp}</g>`;
+}
+function fitFlow() {
+  const els = $$('#fe-nodes .fnode');
+  if (!els.length) return;
+  const c = $('#fe-canvas');
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const el of els) {
+    const n = fe.flow.nodes[el.dataset.id];
+    minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
+    maxX = Math.max(maxX, n.x + el.offsetWidth); maxY = Math.max(maxY, n.y + el.offsetHeight);
+  }
+  const s = Math.min(1, (c.clientWidth - 80) / (maxX - minX), (c.clientHeight - 80) / (maxY - minY));
+  fe.scale = Math.max(0.3, s);
+  fe.tx = (c.clientWidth - (maxX - minX) * fe.scale) / 2 - minX * fe.scale;
+  fe.ty = (c.clientHeight - (maxY - minY) * fe.scale) / 2 - minY * fe.scale;
+  applyTransform();
+}
+function zoomAt(cx, cy, factor) {
+  const s = Math.min(1.8, Math.max(0.3, fe.scale * factor));
+  const k = s / fe.scale;
+  fe.tx = cx - (cx - fe.tx) * k;
+  fe.ty = cy - (cy - fe.ty) * k;
+  fe.scale = s;
+  applyTransform();
+}
+const canvasCenter = () => {
+  const c = $('#fe-canvas');
+  return { x: (c.clientWidth / 2 - fe.tx) / fe.scale - 120, y: (c.clientHeight / 2 - fe.ty) / fe.scale - 40 };
+};
+$('#fe-zoom-in').addEventListener('click', () => { const c = $('#fe-canvas'); zoomAt(c.clientWidth / 2, c.clientHeight / 2, 1.2); });
+$('#fe-zoom-out').addEventListener('click', () => { const c = $('#fe-canvas'); zoomAt(c.clientWidth / 2, c.clientHeight / 2, 1 / 1.2); });
+$('#fe-zoom-fit').addEventListener('click', fitFlow);
+$('#fe-canvas').addEventListener('wheel', (e) => {
+  if (!fe) return;
+  e.preventDefault();
+  const r = e.currentTarget.getBoundingClientRect();
+  zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.1 : 1 / 1.1);
+}, { passive: false });
+
+/* ----- adding / removing steps ----- */
+function addNode(type, pos, connectFrom) {
+  const id = rid('n');
+  const p = pos || canvasCenter();
+  const stagger = Object.keys(fe.flow.nodes).length % 5 * 18;
+  fe.flow.nodes[id] = { type, x: Math.round(p.x + (pos ? 0 : stagger)), y: Math.round(p.y + (pos ? 0 : stagger)), next: null, ...DEFAULTS[type]() };
+  if (connectFrom) setTarget(fe.flow.nodes[connectFrom.id], connectFrom.key, id);
+  fe.selected = id;
+  fe.mode = 'props';
+  markDirty();
+  renderCanvas();
+  renderSide();
+  return id;
+}
+function deleteNode(id) {
+  if (id === 'start') return;
+  delete fe.flow.nodes[id];
+  for (const n of Object.values(fe.flow.nodes)) {
+    for (const k of ['next', 'yes', 'no']) if (n[k] === id) n[k] = null;
+    for (const o of n.options || []) if (o.next === id) o.next = null;
+  }
+  fe.selected = null;
+  markDirty();
+  renderCanvas();
+  renderSide();
+}
+function duplicateNode(id) {
+  const src = fe.flow.nodes[id];
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.next = null; copy.yes = null; copy.no = null;
+  for (const o of copy.options || []) { o.id = rid('o'); o.next = null; }
+  if (copy.label) copy.label += ' (copy)';
+  const nid = rid('n');
+  fe.flow.nodes[nid] = { ...copy, x: src.x + 30, y: src.y + 30 };
+  fe.selected = nid;
+  markDirty();
+  renderCanvas();
+  renderSide();
+}
+$('#fe-palette').addEventListener('click', (e) => { const b = e.target.closest('[data-add]'); if (b) addNode(b.dataset.add); });
+function showAddMenu(clientX, clientY, connectFrom) {
+  const c = $('#fe-canvas').getBoundingClientRect();
+  const menu = $('#fe-add-menu');
+  const world = { x: (clientX - c.left - fe.tx) / fe.scale, y: (clientY - c.top - fe.ty) / fe.scale - 20 };
+  menu.innerHTML = '<div class="pal-title muted small" style="padding:4px 8px">Add and connect</div>' + PALETTE.map((t) => `
+    <button class="pal-btn" data-type="${t}" style="--nc:${NODE_META[t].color}"><span class="dot"><svg class="ic"><use href="#${NODE_META[t].icon}"/></svg></span><span>${NODE_META[t].label}</span></button>`).join('');
+  menu.style.left = `${Math.min(clientX - c.left, c.width - 200)}px`;
+  menu.style.top = `${Math.min(clientY - c.top, c.height - 330)}px`;
+  menu.classList.remove('hidden');
+  menu.onclick = (ev) => {
+    const b = ev.target.closest('[data-type]');
+    if (!b) return;
+    menu.classList.add('hidden');
+    addNode(b.dataset.type, world, connectFrom);
+  };
+}
+
+/* ----- pointer interactions: select, move, pan, connect ----- */
+function selectNode(id) {
+  fe.selected = id;
+  fe.mode = 'props';
+  $$('#fe-nodes .fnode').forEach((el) => el.classList.toggle('selected', el.dataset.id === id));
+  renderSide();
+}
+$('#fe-canvas').addEventListener('pointerdown', (e) => {
+  if (!fe || e.button !== 0) return;
+  if (!e.target.closest('#fe-add-menu')) $('#fe-add-menu').classList.add('hidden');
+  if (e.target.closest('.fe-zoom, #fe-add-menu, .edge-hit')) return;
+  const port = e.target.closest('.port.out');
+  const nodeEl = e.target.closest('.fnode');
+  if (port) {
+    fe.drag = { type: 'connect', from: nodeEl.dataset.id, key: port.dataset.key, start: portPos(port) };
+  } else if (nodeEl) {
+    const id = nodeEl.dataset.id;
+    if (fe.selected !== id || fe.mode !== 'props') selectNode(id);
+    const n = fe.flow.nodes[id];
+    if (e.target.closest('.fn-head, .fn-body')) fe.drag = { type: 'move', id, el: nodeEl, sx: e.clientX, sy: e.clientY, ox: n.x, oy: n.y, moved: false };
+  } else {
+    fe.drag = { type: 'pan', sx: e.clientX, sy: e.clientY, tx: fe.tx, ty: fe.ty, moved: false };
+    e.currentTarget.classList.add('panning');
+  }
+  if (fe.drag) e.currentTarget.setPointerCapture(e.pointerId);
+});
+$('#fe-canvas').addEventListener('pointermove', (e) => {
+  const d = fe?.drag;
+  if (!d) return;
+  if (d.type === 'move') {
+    const n = fe.flow.nodes[d.id];
+    n.x = Math.round(d.ox + (e.clientX - d.sx) / fe.scale);
+    n.y = Math.round(d.oy + (e.clientY - d.sy) / fe.scale);
+    d.el.style.left = `${n.x}px`;
+    d.el.style.top = `${n.y}px`;
+    if (!d.moved && Math.abs(e.clientX - d.sx) + Math.abs(e.clientY - d.sy) > 3) d.moved = true;
+    drawEdges();
+  } else if (d.type === 'pan') {
+    fe.tx = d.tx + (e.clientX - d.sx);
+    fe.ty = d.ty + (e.clientY - d.sy);
+    if (Math.abs(e.clientX - d.sx) + Math.abs(e.clientY - d.sy) > 3) d.moved = true;
+    applyTransform();
+  } else if (d.type === 'connect') {
+    const w = $('#fe-world').getBoundingClientRect();
+    const p = { x: (e.clientX - w.left) / fe.scale, y: (e.clientY - w.top) / fe.scale };
+    drawEdges(`<path class="temp" d="${curve(d.start, p)}"/>`);
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('.fnode');
+    $$('#fe-nodes .fnode').forEach((el) => el.classList.toggle('drop-target', el === over && el.dataset.id !== d.from && el.dataset.id !== 'start'));
+  }
+});
+$('#fe-canvas').addEventListener('pointerup', (e) => {
+  const d = fe?.drag;
+  if (!d) return;
+  fe.drag = null;
+  e.currentTarget.classList.remove('panning');
+  if (d.type === 'move' && d.moved) markDirty();
+  if (d.type === 'pan' && !d.moved && fe.selected) { fe.selected = null; renderCanvas(); renderSide(); }
+  if (d.type === 'connect') {
+    $$('#fe-nodes .fnode').forEach((el) => el.classList.remove('drop-target'));
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('.fnode');
+    if (over && over.dataset.id !== d.from && over.dataset.id !== 'start') {
+      setTarget(fe.flow.nodes[d.from], d.key, over.dataset.id);
+      markDirty();
+      renderCanvas();
+      if (fe.selected === d.from) renderSide();
+    } else if (!over) {
+      drawEdges();
+      showAddMenu(e.clientX, e.clientY, { id: d.from, key: d.key }); // dropped on empty space
+    } else drawEdges();
+  }
+});
+$('#fe-edges').addEventListener('click', (e) => {
+  const g = e.target.closest('g[data-from]');
+  if (!g || !confirm('Remove this connection?')) return;
+  setTarget(fe.flow.nodes[g.dataset.from], g.dataset.key, null);
+  markDirty();
+  renderCanvas();
+  if (fe.selected === g.dataset.from) renderSide();
+});
+document.addEventListener('keydown', (e) => {
+  if (!fe || currentTab !== 'flows' || $('#flow-editor').classList.contains('hidden')) return;
+  if (e.target.matches('input, textarea, select')) return;
+  if ((e.key === 'Delete' || e.key === 'Backspace') && fe.selected && fe.selected !== 'start') { e.preventDefault(); deleteNode(fe.selected); }
+  if (e.key === 'Escape') { $('#fe-add-menu').classList.add('hidden'); if (fe.selected) { fe.selected = null; renderCanvas(); renderSide(); } }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveFlow().catch((err) => alert(err.message)); }
+});
+
+/* ----- side panel: flow settings, step properties, test chat ----- */
+const sel = (attrs, opts, value) => `<select ${attrs}>${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(value ?? '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+const nextOptions = (selfId) => [['', '— End the flow —'],
+  ...Object.entries(fe.flow.nodes).filter(([id, n]) => id !== selfId && n.type !== 'start')
+    .map(([id, n]) => [id, `${n.label || NODE_META[n.type].label}: ${nodeSummary(n).split('\n')[0].slice(0, 40)}`])];
+const nextField = (label, n, id, key) => `<label>${label} ${sel(`data-next="${key}"`, nextOptions(id), getTarget(n, key) || '')}</label>`;
+const chips = (target) => `<div class="var-chips">${flowVars().map((v) => `<button type="button" data-chip="${v}" data-target="${target}">{{${v}}}</button>`).join('')}</div>`;
+const textArea = (n, field = 'text', label = 'Message', ph = '') => `<label>${label}<textarea data-f="${field}" rows="4" placeholder="${esc(ph)}">${esc(n[field] || '')}</textarea></label>${chips(field)}`;
+
+function renderSide() {
+  const side = $('#fe-side');
+  if (!fe) return;
+  if (fe.mode === 'test') return renderSim();
+  const id = fe.selected;
+  const n = id && fe.flow.nodes[id];
+  if (!n) return renderFlowSettings();
+  const m = NODE_META[n.type];
+  let body = '';
+  switch (n.type) {
+    case 'start':
+      body = `<p class="help">This is where every conversation begins. Set when it starts under <a href="#" data-act="settings">Flow settings</a>.</p>
+        ${nextField('First step', n, id, 'next')}`;
+      break;
+    case 'message':
+      body = `${textArea(n, 'text', 'Message', 'Hi {{name}}! …')}
+        <label>Image URL (optional)<input data-f="imageUrl" value="${esc(n.imageUrl || '')}" placeholder="https://…/photo.jpg" /></label>
+        ${nextField('Then go to', n, id, 'next')}`;
+      break;
+    case 'menu':
+      body = `${textArea(n, 'text', 'Question / message')}
+        <label>Show options as ${sel('data-f="style" data-rerender="1"', [['buttons', 'Buttons (max 3, numbers shown too)'], ['list', 'Numbered list (up to 10)']], n.style)}</label>
+        <div><strong class="small">Options</strong> <span class="help">Customer taps a button, types the number or the option text.</span></div>
+        ${(n.options || []).map((o, i) => `<div class="opt-row">
+          <input data-opt-title="${o.id}" value="${esc(o.title)}" maxlength="${n.style === 'buttons' ? 20 : 60}" placeholder="Option ${i + 1}" />
+          ${sel(`data-next="opt:${o.id}"`, nextOptions(id), o.next || '')}
+          <button type="button" class="btn sm danger" data-act="del-opt" data-opt="${o.id}" title="Remove option">✕</button></div>`).join('')}
+        ${(n.options || []).length < (n.style === 'buttons' ? 3 : 10) ? '<button type="button" class="btn sm" data-act="add-opt">+ Add option</button>' : ''}
+        <label>Save the choice as variable<input data-f="variable" value="${esc(n.variable || 'choice')}" /></label>
+        <label>Reply when the answer isn't an option<input data-f="invalidText" value="${esc(n.invalidText || '')}" placeholder="Please choose one of the options." /></label>
+        <label>Image URL (optional)<input data-f="imageUrl" value="${esc(n.imageUrl || '')}" placeholder="https://…" /></label>
+        ${n.style === 'buttons' ? `<label>Footer (optional)<input data-f="footer" value="${esc(n.footer || '')}" /></label>` : ''}`;
+      break;
+    case 'question':
+      body = `${textArea(n, 'text', 'Question', "What's your email address?")}
+        <label>Save the answer as variable<input data-f="variable" value="${esc(n.variable || '')}" placeholder="email" /></label>
+        <p class="help">Saved on the contact too, so you can use {{${esc(n.variable || 'variable')}}} later and in campaigns.</p>
+        <label>Expected answer ${sel('data-f="validate"', Object.entries(VALIDATE), n.validate || 'any')}</label>
+        <label>Reply when the answer is invalid<input data-f="invalidText" value="${esc(n.invalidText || '')}" placeholder="Please reply with a valid answer." /></label>
+        ${nextField('Then go to', n, id, 'next')}`;
+      break;
+    case 'condition':
+      body = `<label>Check variable <input data-f="variable" list="fe-vars" value="${esc(n.variable || '')}" placeholder="choice" /></label>
+        <datalist id="fe-vars">${flowVars().map((v) => `<option value="${v}">`).join('')}</datalist>
+        <label>Condition ${sel('data-f="operator" data-rerender="1"', Object.entries(OPERATORS), n.operator)}</label>
+        ${['exists', 'not_exists'].includes(n.operator) ? '' : `<label>Value<input data-f="value" value="${esc(n.value ?? '')}" /></label>`}
+        ${nextField('If yes, go to', n, id, 'yes')}${nextField('If no, go to', n, id, 'no')}`;
+      break;
+    case 'action':
+      body = `<label>Action ${sel('data-f="action" data-rerender="1"', Object.entries(ACTIONS), n.action)}</label>
+        ${n.action === 'set_variable' ? `<label>Variable<input data-f="variable" value="${esc(n.variable || '')}" placeholder="vip" /></label>` : ''}
+        ${n.action === 'opt_in' ? '<p class="help">Use after the customer agrees to receive offers, so they can be included in campaigns.</p>' : ''}
+        ${n.action === 'webhook' ? '<p class="help">POSTs a "flow.action" event with all collected variables to the WEBHOOK_URL in .env.</p>' : ''}
+        ${['add_tag', 'remove_tag', 'set_variable', 'webhook'].includes(n.action)
+          ? `<label>${n.action === 'webhook' ? 'Label (optional)' : n.action === 'set_variable' ? 'Value' : 'Tag'}<input data-f="value" value="${esc(n.value || '')}" placeholder="${n.action === 'set_variable' ? 'yes or {{choice}}' : 'lead'}" /></label>` : ''}
+        ${nextField('Then go to', n, id, 'next')}`;
+      break;
+    case 'delay': {
+      const s = Number(n.seconds) || 60;
+      const unit = s % 3600 === 0 ? 3600 : s % 60 === 0 ? 60 : 1;
+      body = `<label>Wait<div class="inline-fields" style="justify-content:flex-start"><input type="number" min="1" data-delay="amount" value="${s / unit}" />
+          ${sel('data-delay="unit"', [[1, 'seconds'], [60, 'minutes'], [3600, 'hours']], unit)}</div></label>
+        <p class="help">The bot pauses, then continues by itself. Maximum 24 hours.</p>
+        ${nextField('Then go to', n, id, 'next')}`;
+      break;
+    }
+    case 'handoff':
+      body = `<p class="help">Creates a ticket with everything the bot collected and ends the flow. Your team continues the chat from Tickets.</p>
+        <label>Department ${sel('data-f="departmentId"', [['', 'Use routing rules'], ...departments.map((d) => [d.id, d.name])], n.departmentId || '')}</label>
+        <label>Priority ${sel('data-f="priority"', [['low', 'Low'], ['normal', 'Normal'], ['high', 'High'], ['urgent', 'Urgent']], n.priority || 'normal')}</label>
+        <label>Ticket subject<input data-f="subject" value="${esc(n.subject || '')}" placeholder="New lead: {{name}}" /></label>
+        ${textArea(n, 'text', 'Message to the customer', 'Connecting you to our team…')}`;
+      break;
+    case 'end':
+      body = textArea(n, 'text', 'Closing message (optional)', 'Thanks for chatting with us!');
+      break;
+  }
+  side.innerHTML = `<h3><span class="dot" style="--nc:${m.color};width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:${m.color};color:#fff"><svg class="ic" style="width:13px;height:13px"><use href="#${m.icon}"/></svg></span>${m.label}</h3>
+    ${n.type !== 'start' ? `<label>Step name (optional)<input data-f="label" value="${esc(n.label || '')}" placeholder="${m.label}" /></label>` : ''}
+    ${body}
+    ${n.type !== 'start' ? `<div class="side-actions"><button type="button" class="btn sm" data-act="dup-node">Duplicate step</button>
+      <button type="button" class="btn sm danger" data-act="del-node">Delete step</button></div>` : ''}`;
+}
+
+function renderFlowSettings() {
+  const f = fe.flow;
+  const sessions = [...new Set([...flowSessionIds, ...(f.sessionIds || [])])];
+  $('#fe-side').innerHTML = `<h3>Flow settings</h3>
+    <p class="help">Select a step on the canvas to edit it, or add steps from the left.</p>
+    <label>Start this flow when ${sel('data-flow="trigger.type" data-rerender="1"', Object.entries(TRIGGER_LABEL), f.trigger.type)}</label>
+    ${f.trigger.type === 'keyword' ? `
+      <label>Keywords (comma separated)<input data-flow="trigger.keywords" value="${esc((f.trigger.keywords || []).join(', '))}" placeholder="hi, menu, price" /></label>
+      <label>Match ${sel('data-flow="trigger.match"', [['contains', 'Message contains the keyword'], ['exact', 'Message is exactly the keyword']], f.trigger.match)}</label>` : ''}
+    <div><strong class="small">WhatsApp numbers</strong> <span class="help">None ticked = all numbers.</span>
+      <div class="check-list">${sessions.length ? sessions.map((s) => `<label class="check"><input type="checkbox" data-flow-session="${esc(s)}" ${f.sessionIds?.includes(s) ? 'checked' : ''}> ${esc(s)}</label>`).join('') : '<span class="muted small">No numbers linked yet</span>'}</div></div>
+    <label>End an unanswered conversation after (minutes)<input type="number" min="5" max="1440" data-flow="timeoutMinutes" value="${f.timeoutMinutes}" /></label>
+    ${f.trigger.type !== 'keyword' ? `<label>Don't restart for the same customer within (minutes)<input type="number" min="0" max="10080" data-flow="cooldownMinutes" value="${f.cooldownMinutes}" /></label>` : ''}
+    <label>Description (optional)<textarea data-flow="description" rows="2">${esc(f.description || '')}</textarea></label>`;
+}
+
+function onSideInput(e) {
+  if (!fe) return;
+  const el = e.target;
+  const n = fe.selected && fe.flow.nodes[fe.selected];
+  const f = fe.flow;
+  if (el.dataset.f && n) {
+    n[el.dataset.f] = el.value === '' && el.dataset.f === 'departmentId' ? null : el.value;
+    if (el.dataset.f === 'style' && el.value === 'buttons') n.options = (n.options || []).slice(0, 3);
+  } else if (el.dataset.next && n) setTarget(n, el.dataset.next, el.value);
+  else if (el.dataset.optTitle && n) n.options.find((o) => o.id === el.dataset.optTitle).title = el.value;
+  else if (el.dataset.delay && n) {
+    const box = el.closest('label');
+    n.seconds = Math.min(86400, Math.max(1, Math.round(Number(box.querySelector('[data-delay=amount]').value || 1) * Number(box.querySelector('[data-delay=unit]').value))));
+  } else if (el.dataset.flow) {
+    const k = el.dataset.flow;
+    if (k === 'trigger.type') f.trigger.type = el.value;
+    else if (k === 'trigger.keywords') f.trigger.keywords = el.value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+    else if (k === 'trigger.match') f.trigger.match = el.value;
+    else f[k] = el.type === 'number' ? Number(el.value) : el.value;
+  } else if (el.dataset.flowSession) {
+    f.sessionIds = $$('#fe-side [data-flow-session]:checked').map((x) => x.dataset.flowSession);
+  } else return;
+  markDirty();
+  renderCanvas();
+  if (e.type === 'change' && el.dataset.rerender) renderSide();
+}
+$('#fe-side').addEventListener('input', onSideInput);
+$('#fe-side').addEventListener('change', onSideInput);
+$('#fe-side').addEventListener('click', (e) => {
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  const chip = e.target.dataset.chip;
+  const n = fe?.selected && fe.flow.nodes[fe.selected];
+  if (chip) {
+    const ta = $(`#fe-side [data-f="${e.target.dataset.target}"]`);
+    const pos = ta.selectionStart ?? ta.value.length;
+    ta.value = `${ta.value.slice(0, pos)}{{${chip}}}${ta.value.slice(ta.selectionEnd ?? pos)}`;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.focus();
+    return;
+  }
+  if (!act) return;
+  e.preventDefault();
+  if (act === 'settings') { fe.selected = null; renderCanvas(); renderSide(); }
+  if (act === 'add-opt') { n.options.push({ id: rid('o'), title: `Option ${n.options.length + 1}`, next: null }); markDirty(); renderCanvas(); renderSide(); }
+  if (act === 'del-opt') { n.options = n.options.filter((o) => o.id !== e.target.closest('[data-opt]').dataset.opt); markDirty(); renderCanvas(); renderSide(); }
+  if (act === 'del-node' && confirm('Delete this step?')) deleteNode(fe.selected);
+  if (act === 'dup-node') duplicateNode(fe.selected);
+});
+
+/* ----- test chat ----- */
+function renderSim() {
+  const s = fe.sim;
+  const wait = s.waitingFor;
+  $('#fe-side').innerHTML = `<div class="sim">
+    <div class="row space-between" style="margin:0"><h3>Test chat</h3>
+      <div class="row"><button class="btn sm" data-sim="restart">Restart</button><button class="btn sm" data-sim="close">Close</button></div></div>
+    <p class="help">Tests your current changes (even unsaved). Nothing is sent and no tickets or tags are created.
+      ${fe.flow.trigger.type === 'keyword' ? `Start by typing a keyword, e.g. "${esc(fe.flow.trigger.keywords?.[0] || '')}".` : 'Type any message to start.'}</p>
+    <div class="sim-log" id="sim-log">${s.log.map((m) => {
+      if (m.type === 'you') return `<div class="sim-msg you">${esc(m.text)}</div>`;
+      if (m.type === 'system') return `<div class="sim-msg system">${esc(m.text)}</div>`;
+      return `<div class="sim-msg bot">${m.imageUrl ? `<img src="${esc(m.imageUrl)}" alt="">` : ''}${esc(m.text)}${m.footer ? `<div class="muted small">${esc(m.footer)}</div>` : ''}</div>`
+        + (m.buttons ? `<div class="sim-btns">${m.buttons.map((b) => `<button data-reply="${esc(b.title)}">↩ ${esc(b.title)}</button>`).join('')}</div>` : '');
+    }).join('')}</div>
+    ${wait?.type === 'menu' && wait.style !== 'buttons' ? `<div class="var-chips">${wait.options.map((o, i) => `<button data-reply="${i + 1}">${i + 1}. ${esc(o.title)}</button>`).join('')}</div>` : ''}
+    <form class="sim-input" id="sim-form"><input name="msg" placeholder="Type a message…" autocomplete="off" /><button class="btn primary">Send</button></form>
+  </div>`;
+  const log = $('#sim-log');
+  log.scrollTop = log.scrollHeight;
+  $('#sim-form').msg.focus();
+}
+async function simSend(text) {
+  const s = fe.sim;
+  s.log.push({ type: 'you', text });
+  renderSim();
+  try {
+    const r = await api('/flows/simulate', { method: 'POST', body: { flow: fe.flow, state: s.state, input: text } });
+    s.log.push(...r.output);
+    s.state = r.state;
+    s.waitingFor = r.waitingFor;
+  } catch (err) { s.log.push({ type: 'system', text: `Error: ${err.message}` }); }
+  renderSim();
+}
+$('#fe-side').addEventListener('submit', (e) => {
+  if (e.target.id !== 'sim-form') return;
+  e.preventDefault();
+  const v = e.target.msg.value.trim();
+  if (v) simSend(v);
+});
+$('#fe-side').addEventListener('click', (e) => {
+  if (!fe || fe.mode !== 'test') return;
+  const reply = e.target.closest('[data-reply]')?.dataset.reply;
+  const act = e.target.dataset.sim;
+  if (reply) simSend(reply);
+  if (act === 'restart') { fe.sim = { state: null, log: [], waitingFor: null }; renderSim(); }
+  if (act === 'close') { fe.mode = 'props'; renderSide(); }
 });
 
 /* ---------- Block risk (admin) ---------- */

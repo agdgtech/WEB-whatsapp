@@ -8,9 +8,16 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers,
+  proto,
+  prepareWAMessageMedia,
+  generateWAMessageFromContent,
+  normalizeMessageContent,
 } from '@whiskeysockets/baileys';
 import { db, save, uid, now, normalizePhone } from './store.js';
 import { emitWebhook } from './webhook.js';
+import { handleIncoming } from './tickets.js';
+import { textOptions, nativeFlowButtons, rememberMenu, resolveChoice } from './buttons.js';
+import { sessionMeta } from './health.js';
 
 const SESSIONS_DIR = path.resolve('sessions');
 const OPT_OUT_WORDS = ['stop', 'unsubscribe', 'optout', 'opt out', 'cancel'];
@@ -74,11 +81,17 @@ export async function startSession(id) {
       state.qr = state.qrDataUrl = null;
       state.retries = 0;
       state.user = { id: sock.user?.id, name: sock.user?.name };
+      sessionMeta(id); // remembers when we first saw this number (used for warm-up)
+      save();
       emitWebhook('session.connected', { sessionId: id, user: state.user });
     }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       state.qr = state.qrDataUrl = null;
+      // unexpected logouts/drops feed the block-risk analysis (normal restarts and our own unlink don't count)
+      if (!state.stopped && code !== DisconnectReason.restartRequired) {
+        recordSessionEvent(id, code === DisconnectReason.loggedOut ? 'logged_out' : 'disconnected', code);
+      }
       if (code === DisconnectReason.loggedOut) {
         state.status = 'logged_out';
         fs.rmSync(authDir, { recursive: true, force: true });
@@ -103,22 +116,71 @@ export async function startSession(id) {
       const jid = m.key.remoteJidAlt || m.key.remoteJid || '';
       if (!jid.endsWith('@s.whatsapp.net')) continue; // ignore groups, broadcasts, LID-only senders
       const phone = jid.split('@')[0];
-      const text =
-        m.message.conversation ||
-        m.message.extendedTextMessage?.text ||
-        m.message.imageMessage?.caption ||
-        m.message.videoMessage?.caption ||
-        '';
+      const msg = normalizeMessageContent(m.message);
+      const { text: raw, buttonId } = buttonReply(msg) || { text: messageText(msg) };
+      if (!raw) continue; // reactions, receipts, protocol messages
+
+      // a tap on one of our buttons, or a typed menu number ("1")
+      const choice = resolveChoice(id, phone, { buttonId, text: raw });
+      const text = choice ? (buttonId ? `[button] ${choice.title}` : `${raw} → ${choice.title}`) : raw;
+
       db.messages.push({
         id: uid(), sessionId: id, to: phone, text, status: 'received', direction: 'in', createdAt: now(),
+        ...(choice ? { buttonId: choice.id } : {}),
       });
-      handleOptOut(id, phone, text);
+      handleOptOut(id, phone, raw);
       save();
-      emitWebhook('message.received', { sessionId: id, from: phone, text, pushName: m.pushName, raw: m });
+      emitWebhook('message.received', {
+        sessionId: id, from: phone, text, pushName: m.pushName,
+        button: choice ? { id: choice.id, title: choice.title } : null, raw: m,
+      });
+      handleIncoming(id, phone, text, m.pushName, { autoReply: choice?.reply })
+        .catch((e) => console.error('Ticket error:', e.message));
     }
   });
 
   return publicView(state);
+}
+
+// Responses to button messages, in the formats different WhatsApp versions use.
+function buttonReply(msg) {
+  const nf = msg.interactiveResponseMessage;
+  if (nf) {
+    let params = {};
+    try { params = JSON.parse(nf.nativeFlowResponseMessage?.paramsJson || '{}'); } catch {}
+    return { text: nf.body?.text || params.display_text || '', buttonId: params.id };
+  }
+  if (msg.buttonsResponseMessage) {
+    return { text: msg.buttonsResponseMessage.selectedDisplayText, buttonId: msg.buttonsResponseMessage.selectedButtonId };
+  }
+  if (msg.templateButtonReplyMessage) {
+    return { text: msg.templateButtonReplyMessage.selectedDisplayText, buttonId: msg.templateButtonReplyMessage.selectedId };
+  }
+  return null;
+}
+
+function messageText(msg) {
+  const caption = (x, label) => (x ? `[${label}]${x.caption ? ' ' + x.caption : ''}` : '');
+  return (
+    msg.conversation ||
+    msg.extendedTextMessage?.text ||
+    caption(msg.imageMessage, 'image') ||
+    caption(msg.videoMessage, 'video') ||
+    (msg.documentMessage ? `[document] ${msg.documentMessage.fileName || ''}`.trim() : '') ||
+    (msg.audioMessage ? '[voice note]' : '') ||
+    (msg.stickerMessage ? '[sticker]' : '') ||
+    (msg.locationMessage ? `[location] ${msg.locationMessage.degreesLatitude},${msg.locationMessage.degreesLongitude}` : '') ||
+    (msg.contactMessage ? `[contact] ${msg.contactMessage.displayName || ''}`.trim() : '') ||
+    msg.buttonsResponseMessage?.selectedDisplayText ||
+    msg.listResponseMessage?.title ||
+    ''
+  );
+}
+
+function recordSessionEvent(id, type, code) {
+  const meta = sessionMeta(id);
+  meta.events = [...(meta.events || []), { type, code, at: now() }].slice(-100);
+  save();
 }
 
 function handleOptOut(sessionId, phone, text) {
@@ -130,6 +192,7 @@ function handleOptOut(sessionId, phone, text) {
     db.contacts.push(c);
   }
   c.optedOut = true;
+  c.optedOutAt = now();
   emitWebhook('contact.opted_out', { sessionId, phone });
   sendText(sessionId, phone, 'You have been unsubscribed and will not receive further messages.').catch(() => {});
 }
@@ -179,6 +242,50 @@ export async function sendMedia(sessionId, phone, { url, buffer, mimetype = '', 
     content = { document: src, mimetype: mimetype || 'application/octet-stream', fileName: fileName || 'file', caption };
   }
   return sock.sendMessage(toJid(phone), content);
+}
+
+// Tells WhatsApp servers this is an interactive (native flow) message; without it buttons are dropped.
+const BIZ_NODE = {
+  tag: 'biz',
+  attrs: {},
+  content: [{ tag: 'interactive', attrs: { type: 'native_flow', v: '1' }, content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }] }],
+};
+
+// Image (optional) + text + up to 3 buttons. `buttons` must already be validated (see buttons.js).
+// image: { url } or { buffer }. The options are also written into the text so the message still
+// works on phones that don't display buttons.
+export async function sendButtons(sessionId, phone, { text, footer, image, buttons, campaignId, includeTextOptions = true }) {
+  const sock = requireConnected(sessionId);
+  const jid = toJid(phone);
+  const body = includeTextOptions ? `${text}\n\n${textOptions(buttons)}` : text;
+
+  const header = { title: '', subtitle: '', hasMediaAttachment: false };
+  if (image) {
+    const media = await prepareWAMessageMedia(
+      { image: image.buffer || { url: image.url } },
+      { upload: sock.waUploadToServer, logger },
+    );
+    header.hasMediaAttachment = true;
+    header.imageMessage = media.imageMessage;
+  }
+
+  const content = proto.Message.fromObject({
+    viewOnceMessage: {
+      message: {
+        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+        interactiveMessage: {
+          header,
+          body: { text: body },
+          footer: { text: footer || '' },
+          nativeFlowMessage: { buttons: nativeFlowButtons(buttons), messageParamsJson: '' },
+        },
+      },
+    },
+  });
+  const msg = generateWAMessageFromContent(jid, content, { userJid: sock.user.id });
+  await sock.relayMessage(jid, msg.message, { messageId: msg.key.id, additionalNodes: [BIZ_NODE] });
+  rememberMenu(sessionId, normalizePhone(phone), buttons, campaignId);
+  return msg;
 }
 
 // Restore every session that has saved credentials on disk.

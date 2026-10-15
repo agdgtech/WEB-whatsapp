@@ -12,6 +12,14 @@ const empty = () => ({
   campaigns: [],   // { id, name, sessionId, message, mediaUrl, tags[], status, stats, createdAt }
   messages: [],    // { id, sessionId, to, text, status, error, campaignId, direction, createdAt }
   dailyCounts: {}, // { "<sessionId>:<YYYY-MM-DD>": n }
+  tickets: [],     // see src/tickets.js
+  ticketSeq: 1000, // last ticket number issued
+  users: [],       // { id, username, name, role, departmentIds[], active, passwordHash, createdAt }
+  departments: [], // { id, name, description, sessionIds[], keywords[], autoAssign, isDefault, createdAt }
+  authTokens: [],  // { hash, userId, exp } — dashboard logins
+  menus: {},       // "<sessionId>:<phone>" -> last button menu sent { buttons, campaignId, sentAt }
+  settings: null,  // anti-block protection settings (src/settings.js)
+  sessionMeta: {}, // sessionId -> { firstSeenAt, numberSince, events: [{ type, at }] }
 });
 
 fs.mkdirSync(DATA_DIR, { recursive: true });

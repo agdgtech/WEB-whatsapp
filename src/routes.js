@@ -1,11 +1,22 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { db, save, uid, now, normalizePhone, logMessage } from './store.js';
-import { login, logout, requireAuth, requireAdmin, newApiKey } from './auth.js';
 import {
-  listSessions, getSession, startSession, stopSession, sendText, sendMedia, isOnWhatsApp,
+  ROLES, login, logout, requireAuth, requireRole, requireAdminUser, newApiKey, hashPassword, verifyPassword, validatePassword,
+  publicUser, revokeUserTokens,
+} from './auth.js';
+import {
+  listSessions, getSession, startSession, stopSession, sendText, sendMedia, sendButtons, isOnWhatsApp,
 } from './whatsapp.js';
+import { validateButtons } from './buttons.js';
 import { createCampaign, startCampaign, pauseCampaign } from './campaigns.js';
+import {
+  listTickets, getTicketFor, createTicket, replyToTicket, addNote, updateTicket, ticketStats, withNames,
+} from './tickets.js';
+import { findDepartment, findUser } from './departments.js';
+import { dashboard } from './analytics.js';
+import { healthReport, sessionMeta } from './health.js';
+import { getSettings, updateSettings, RECOMMENDED } from './settings.js';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } });
 const r = Router();
@@ -20,42 +31,167 @@ const h = (fn) => async (req, res) => {
   }
 };
 const notFound = (what) => Object.assign(new Error(`${what} not found`), { status: 404 });
+const bad = (msg) => Object.assign(new Error(msg), { status: 400 });
+
+const ADMIN = requireRole('admin');
+const STAFF = requireRole('admin', 'manager'); // admins and managers
 
 /* ---------- Auth ---------- */
 r.post('/auth/login', h((req) => {
-  const token = login(req.body?.username, req.body?.password);
-  if (!token) throw Object.assign(new Error('Invalid credentials'), { status: 401 });
-  return { token };
-}));
-r.post('/auth/logout', requireAdmin, h((req) => {
-  logout((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+  const out = login(req.body?.username, req.body?.password);
+  if (!out) throw Object.assign(new Error('Invalid username or password'), { status: 401 });
+  return out;
 }));
 
-/* ---------- API keys (admin only) ---------- */
-r.get('/keys', requireAdmin, h(() => db.apiKeys.map((k) => ({ ...k, key: k.key.slice(0, 10) + '…' }))));
-r.post('/keys', requireAdmin, h((req) => {
+/* Everything below needs a signed-in user or an API key */
+r.use(requireAuth);
+
+r.post('/auth/logout', h((req) => {
+  logout((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+}));
+r.get('/auth/me', h((req) => req.user));
+r.post('/auth/password', h((req) => {
+  const u = findUser(req.user.id);
+  if (!u) throw bad('Not available for API keys');
+  const { currentPassword, newPassword } = req.body || {};
+  if (!verifyPassword(currentPassword, u.passwordHash)) throw bad('Current password is wrong');
+  validatePassword(newPassword);
+  u.passwordHash = hashPassword(newPassword);
+  save();
+}));
+
+/* ---------- Users (admin) ---------- */
+function cleanDeptIds(ids) {
+  return [...new Set((Array.isArray(ids) ? ids : []).filter((id) => findDepartment(id)))];
+}
+const activeAdmins = () => db.users.filter((u) => u.role === 'admin' && u.active);
+
+// Minimal list everyone can read, for "assign to" pickers
+r.get('/users/directory', h(() => db.users.filter((u) => u.active)
+  .map(({ id, name, role, departmentIds }) => ({ id, name, role, departmentIds }))));
+
+r.get('/users', ADMIN, h(() => db.users.map(publicUser)));
+r.post('/users', ADMIN, h((req) => {
+  const { name, username, password, role = 'agent', departmentIds } = req.body || {};
+  const uname = String(username || '').trim().toLowerCase();
+  if (!name || !/^[a-z0-9._-]{3,32}$/.test(uname)) throw bad('Name and a 3-32 character username (letters, digits, . _ -) are required');
+  if (db.users.some((u) => u.username === uname)) throw bad('Username already taken');
+  if (!ROLES.includes(role)) throw bad(`role must be one of ${ROLES.join(', ')}`);
+  validatePassword(password);
+  const u = {
+    id: uid(), username: uname, name: String(name).trim(), role, departmentIds: cleanDeptIds(departmentIds),
+    active: true, passwordHash: hashPassword(password), createdAt: now(),
+  };
+  db.users.push(u);
+  save();
+  return publicUser(u);
+}));
+r.patch('/users/:id', ADMIN, h((req) => {
+  const u = findUser(req.params.id);
+  if (!u) throw notFound('User');
+  const b = req.body || {};
+  const losesAdmin = u.role === 'admin' && ((b.role && b.role !== 'admin') || b.active === false);
+  if (losesAdmin && activeAdmins().length <= 1) throw bad('There must be at least one active admin');
+  if (b.name !== undefined) u.name = String(b.name).trim() || u.name;
+  if (b.role !== undefined) {
+    if (!ROLES.includes(b.role)) throw bad(`role must be one of ${ROLES.join(', ')}`);
+    u.role = b.role;
+  }
+  if (b.departmentIds !== undefined) u.departmentIds = cleanDeptIds(b.departmentIds);
+  if (b.active !== undefined) {
+    u.active = !!b.active;
+    if (!u.active) revokeUserTokens(u.id);
+  }
+  if (b.password) {
+    validatePassword(b.password);
+    u.passwordHash = hashPassword(b.password);
+    revokeUserTokens(u.id);
+  }
+  save();
+  return publicUser(u);
+}));
+r.delete('/users/:id', ADMIN, h((req) => {
+  const u = findUser(req.params.id);
+  if (!u) throw notFound('User');
+  if (u.id === req.user.id) throw bad("You can't delete your own account");
+  if (u.role === 'admin' && activeAdmins().length <= 1) throw bad('There must be at least one active admin');
+  for (const t of db.tickets) if (t.assignee === u.id) t.assignee = '';
+  revokeUserTokens(u.id);
+  db.users = db.users.filter((x) => x !== u);
+  save();
+}));
+
+/* ---------- Departments ---------- */
+function deptInput(b, d = {}) {
+  const list = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((x) => String(x).trim()).filter(Boolean);
+  if (b.name !== undefined) {
+    const name = String(b.name).trim();
+    if (!name) throw bad('Department name is required');
+    if (db.departments.some((x) => x.id !== d.id && x.name.toLowerCase() === name.toLowerCase())) throw bad('A department with this name exists');
+    d.name = name;
+  }
+  if (b.description !== undefined) d.description = String(b.description);
+  if (b.sessionIds !== undefined) d.sessionIds = list(b.sessionIds);
+  if (b.keywords !== undefined) d.keywords = list(b.keywords).map((k) => k.toLowerCase());
+  if (b.autoAssign !== undefined) d.autoAssign = !!b.autoAssign;
+  if (b.isDefault !== undefined) {
+    d.isDefault = !!b.isDefault;
+    if (d.isDefault) for (const x of db.departments) if (x.id !== d.id) x.isDefault = false;
+  }
+  return d;
+}
+r.get('/departments', h(() => db.departments.map((d) => ({
+  ...d,
+  members: db.users.filter((u) => u.departmentIds?.includes(d.id)).map((u) => ({ id: u.id, name: u.name, role: u.role })),
+  activeTickets: db.tickets.filter((t) => t.departmentId === d.id && (t.status === 'open' || t.status === 'pending')).length,
+}))));
+r.post('/departments', ADMIN, h((req) => {
+  if (!req.body?.name) throw bad('Department name is required');
+  const d = deptInput(req.body, {
+    id: uid(), name: '', description: '', sessionIds: [], keywords: [], autoAssign: false, isDefault: false, createdAt: now(),
+  });
+  db.departments.push(d);
+  save();
+  return d;
+}));
+r.patch('/departments/:id', ADMIN, h((req) => {
+  const d = findDepartment(req.params.id);
+  if (!d) throw notFound('Department');
+  deptInput(req.body || {}, d);
+  save();
+  return d;
+}));
+r.delete('/departments/:id', ADMIN, h((req) => {
+  const d = findDepartment(req.params.id);
+  if (!d) throw notFound('Department');
+  for (const t of db.tickets) if (t.departmentId === d.id) t.departmentId = null;
+  for (const u of db.users) u.departmentIds = (u.departmentIds || []).filter((x) => x !== d.id);
+  db.departments = db.departments.filter((x) => x !== d);
+  save();
+}));
+
+/* ---------- API keys (admin signed in on the dashboard) ---------- */
+r.get('/keys', requireAdminUser, h(() => db.apiKeys.map((k) => ({ ...k, key: k.key.slice(0, 10) + '…' }))));
+r.post('/keys', requireAdminUser, h((req) => {
   const k = { id: uid(), name: req.body?.name || 'API key', key: newApiKey(), createdAt: now() };
   db.apiKeys.push(k);
   save();
   return k; // full key shown only once
 }));
-r.delete('/keys/:id', requireAdmin, h((req) => {
+r.delete('/keys/:id', requireAdminUser, h((req) => {
   db.apiKeys = db.apiKeys.filter((k) => k.id !== req.params.id);
   save();
 }));
 
-/* Everything below accepts admin token OR API key */
-r.use(requireAuth);
-
 /* ---------- Sessions (WhatsApp numbers) ---------- */
 r.get('/sessions', h(() => listSessions()));
-r.post('/sessions', h((req) => startSession(String(req.body?.id || '').trim())));
-r.get('/sessions/:id', h((req) => {
+r.post('/sessions', ADMIN, h((req) => startSession(String(req.body?.id || '').trim())));
+r.get('/sessions/:id', ADMIN, h((req) => {
   const s = getSession(req.params.id);
   if (!s) throw notFound('Session');
   return { id: s.id, status: s.status, user: s.user || null, qr: s.qrDataUrl || null };
 }));
-r.get('/sessions/:id/qr', h((req, res) => {
+r.get('/sessions/:id/qr', ADMIN, h((req, res) => {
   const s = getSession(req.params.id);
   if (!s) throw notFound('Session');
   if (!s.qrDataUrl) return { status: s.status, qr: null };
@@ -65,9 +201,11 @@ r.get('/sessions/:id/qr', h((req, res) => {
   }
   return { status: s.status, qr: s.qrDataUrl };
 }));
-r.delete('/sessions/:id', h((req) => stopSession(req.params.id, { logout: req.query.logout === 'true' })));
+r.delete('/sessions/:id', ADMIN, h((req) => stopSession(req.params.id, { logout: req.query.logout === 'true' })));
 
-/* ---------- Messaging ---------- */
+/* ---------- Messaging, contacts, campaigns: admins and managers ---------- */
+for (const p of ['/check', '/messages', '/contacts', '/campaigns']) r.use(p, STAFF);
+
 r.get('/check/:sessionId/:phone', h(async (req) => ({
   phone: normalizePhone(req.params.phone),
   exists: await isOnWhatsApp(req.params.sessionId, req.params.phone),
@@ -103,6 +241,27 @@ r.post('/messages/media', upload.single('file'), h(async (req) => {
     return { ok: true, messageId: res?.key?.id };
   } catch (e) {
     logMessage({ sessionId, to: phone, text: caption || '[media]', status: 'failed', error: e.message });
+    throw e;
+  }
+}));
+
+// Image + text + buttons. JSON with imageUrl, or multipart/form-data with an "image" file
+// (then send "buttons" as a JSON string).
+r.post('/messages/buttons', upload.single('image'), h(async (req) => {
+  const { sessionId, to, text, footer, imageUrl } = req.body || {};
+  if (!sessionId || !to || !text) throw bad('sessionId, to and text are required');
+  const buttons = validateButtons(req.body.buttons);
+  const phone = normalizePhone(to);
+  if (db.contacts.find((c) => c.phone === phone)?.optedOut) throw bad('Contact has opted out');
+  if (req.file && !req.file.mimetype.startsWith('image/')) throw bad('The attachment must be an image');
+  const image = req.file ? { buffer: req.file.buffer } : imageUrl ? { url: imageUrl } : null;
+  const label = `${image ? '[image] ' : ''}${text}\n[buttons: ${buttons.map((b) => b.title).join(' | ')}]`;
+  try {
+    const res = await sendButtons(sessionId, phone, { text, footer, image, buttons });
+    logMessage({ sessionId, to: phone, text: label, status: 'sent', waId: res?.key?.id });
+    return { ok: true, messageId: res?.key?.id };
+  } catch (e) {
+    logMessage({ sessionId, to: phone, text: label, status: 'failed', error: e.message });
     throw e;
   }
 }));
@@ -143,10 +302,14 @@ function upsertContact({ phone, name, tags }) {
 }
 
 r.get('/contacts', h((req) => {
-  const { tag, q } = req.query;
-  return db.contacts.filter((c) =>
+  const { tag, q, limit } = req.query;
+  const text = String(q || '').trim().toLowerCase();
+  const digits = normalizePhone(text);
+  const list = db.contacts.filter((c) =>
     (!tag || c.tags?.includes(tag)) &&
-    (!q || c.phone.includes(q) || c.name?.toLowerCase().includes(String(q).toLowerCase())));
+    (!text || (digits && c.phone.includes(digits)) || c.name?.toLowerCase().includes(text) ||
+      c.tags?.some((t) => t.toLowerCase().includes(text))));
+  return limit ? list.slice(0, Number(limit)) : list;
 }));
 r.post('/contacts', h((req) => {
   const items = Array.isArray(req.body) ? req.body : [req.body];
@@ -217,10 +380,12 @@ r.get('/campaigns/:id', h((req) => {
 }));
 r.post('/campaigns', h((req) => {
   const b = req.body || {};
+  const hasButtons = Array.isArray(b.buttons) ? b.buttons.length : !!b.buttons;
   const c = createCampaign({
     ...b,
     tags: Array.isArray(b.tags) ? b.tags : String(b.tags || '').split(',').map((t) => t.trim()).filter(Boolean),
     phones: (Array.isArray(b.phones) ? b.phones : []).map(normalizePhone),
+    buttons: hasButtons ? validateButtons(b.buttons) : null,
   });
   if (b.startNow) startCampaign(c.id);
   return summary(c);
@@ -234,8 +399,66 @@ r.delete('/campaigns/:id', h((req) => {
   save();
 }));
 
+/* ---------- Tickets (everyone; non-admins only see their departments) ---------- */
+// API keys may name the person acting via "by"; signed-in users always act as themselves.
+const actor = (req) => (req.user.apiKey && req.body?.by ? { id: req.user.id, name: String(req.body.by) } : req.user);
+
+r.get('/tickets', h((req) => listTickets(req.user, req.query)));
+r.get('/tickets/stats', h((req) => ticketStats(req.user)));
+r.get('/tickets/:id', h((req) => withNames(getTicketFor(req.user, req.params.id))));
+r.post('/tickets', h(async (req) => {
+  const b = req.body || {};
+  const u = req.user;
+  let departmentId = b.departmentId === undefined ? undefined : (b.departmentId || null);
+  if (u.role !== 'admin') {
+    // non-admins create tickets in their own departments only
+    if (departmentId === undefined || departmentId === null) departmentId = u.departmentIds[0] || null;
+    if (departmentId ? !u.departmentIds.includes(departmentId) : u.role !== 'manager') {
+      throw bad('You can only create tickets in your own departments');
+    }
+  }
+  const t = createTicket({ ...b, departmentId }, actor(req));
+  if (b.message && b.sendMessage) await replyToTicket(t, { text: b.message }, actor(req));
+  else if (b.message) addNote(t, { text: b.message }, actor(req));
+  return withNames(t);
+}));
+r.patch('/tickets/:id', h(async (req) =>
+  withNames(await updateTicket(getTicketFor(req.user, req.params.id), req.body || {}, actor(req)))));
+r.post('/tickets/:id/reply', upload.single('file'), h(async (req) =>
+  withNames(await replyToTicket(getTicketFor(req.user, req.params.id), { text: req.body?.text || '', file: req.file }, actor(req)))));
+r.post('/tickets/:id/notes', h((req) =>
+  withNames(addNote(getTicketFor(req.user, req.params.id), { text: req.body?.text }, actor(req)))));
+r.post('/tickets/:id/read', h((req) => {
+  getTicketFor(req.user, req.params.id).unread = 0;
+  save();
+}));
+r.delete('/tickets/:id', STAFF, h((req) => {
+  const ticket = getTicketFor(req.user, req.params.id);
+  db.tickets = db.tickets.filter((t) => t !== ticket);
+  save();
+}));
+
+/* ---------- Block risk & protection settings (admin) ---------- */
+r.get('/health', ADMIN, h(() => ({ ...healthReport(), recommended: RECOMMENDED })));
+r.get('/settings', ADMIN, h(() => getSettings()));
+r.put('/settings', ADMIN, h((req) => updateSettings(req.body || {})));
+// Tell the system how old a number really is (for the warm-up schedule)
+r.patch('/sessions/:id/meta', ADMIN, h((req) => {
+  const meta = sessionMeta(req.params.id);
+  const since = req.body?.numberSince;
+  if (since && Number.isNaN(Date.parse(since))) throw bad('numberSince must be a date (YYYY-MM-DD)');
+  if (since && Date.parse(since) > Date.now()) throw bad('numberSince cannot be in the future');
+  meta.numberSince = since ? new Date(since).toISOString() : null;
+  save();
+  return meta;
+}));
+
+/* ---------- Dashboard ---------- */
+r.get('/dashboard', h((req) => dashboard(req.user, req.query.days)));
+
 /* ---------- Stats ---------- */
-r.get('/stats', h(() => {
+r.get('/stats', h((req) => {
+  if (req.user.role === 'agent') return { tickets: ticketStats(req.user) };
   const today = new Date().toISOString().slice(0, 10);
   const todays = db.messages.filter((m) => m.createdAt.startsWith(today));
   return {
@@ -247,6 +470,7 @@ r.get('/stats', h(() => {
     sentToday: todays.filter((m) => m.status === 'sent').length,
     failedToday: todays.filter((m) => m.status === 'failed').length,
     receivedToday: todays.filter((m) => m.direction === 'in').length,
+    tickets: ticketStats(req.user),
   };
 }));
 

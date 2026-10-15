@@ -9,9 +9,23 @@ WhatsApp Web QR code (no Meta Business API account needed). Built on Node.js, Ex
 - **Multiple WhatsApp numbers**: link each one by QR, auto-reconnect, sessions survive restarts
 - **Own REST API** with API keys (`x-api-key`) for CRMs, websites, ERPs
 - **Send** text, images, videos, documents (by URL or upload)
+- **Image + button messages** (quick reply, website link, call, copy code) from the dashboard, API and
+  campaigns, with optional automatic answers per button. Buttons are unofficial over WhatsApp Web and
+  may not show on every phone, so options are also sent as text and a typed number counts as a tap
+  (`src/buttons.js`)
 - **Contacts** with tags, CSV import, opt-out tracking
 - **Campaigns**: bulk sends by tag or phone list, `{{name}}` personalisation, `{Hi|Hello}` spintax,
   random delays, daily per-number cap, pause/resume, skips numbers not on WhatsApp
+- **Support tickets**: every incoming WhatsApp message opens or continues a ticket; agents reply from
+  the dashboard (text or files), add internal notes, set status/priority/assignee; auto-acknowledge and
+  resolved messages; customer replies reopen resolved tickets (`src/tickets.js`)
+- **Multi-user with departments**: admin / manager / agent roles; departments (Sales, Support…) get
+  tickets by WhatsApp number or keywords, with optional auto-assign to the least busy member and
+  transfers between departments. Agents only see their own departments' tickets.
+- **Block Risk screen** (admin): a 0–100 risk score per number from reply rate, opt-outs, invalid
+  numbers, volume vs number age, cold messaging, identical text, speed, logouts, night sending and
+  links, with a fix for each. Protection settings that campaigns obey: delays, daily limit, warm-up
+  for young numbers, quiet hours and auto-pause on failure/opt-out spikes (`src/health.js`, `src/settings.js`)
 - **Auto opt-out**: replies of `STOP` / `UNSUBSCRIBE` mark the contact opted out
 - **Webhooks** for incoming messages, connection events, opt-outs and campaign completion
 - **Dashboard**: stats, QR linking, send, contacts, campaigns, logs, API keys, API docs
@@ -42,7 +56,9 @@ server.js            Express app, startup
 src/whatsapp.js      QR login, sessions, send, incoming messages, opt-out
 src/campaigns.js     Bulk campaign runner (throttling, templates, daily limit)
 src/routes.js        REST API
-src/auth.js          Admin login + API keys
+src/auth.js          Users, logins, roles, API keys
+src/departments.js   Ticket routing, auto-assign, ticket visibility
+src/tickets.js       Support tickets
 src/store.js         JSON-file database (data/db.json)
 src/webhook.js       Outgoing webhooks
 public/              Dashboard (HTML/CSS/JS)

@@ -30,7 +30,8 @@ copy_app() {
 
 if [ "${1:-}" = "--update" ]; then
   copy_app
-  sudo -u $APP_USER pm2 restart wa-saas
+  # --update only restarts the app; if you changed PORT in .env, run the full install again so nginx follows
+  sudo -u $APP_USER pm2 restart wa-saas --update-env
   say "Updated and restarted."
   exit 0
 fi
@@ -74,6 +75,9 @@ EOF
 fi
 # keep the existing .env (and its keys) on re-runs
 SETUP_KEY=$(grep -E '^SETUP_KEY=' "$APP_DIR/.env" | cut -d= -f2-)
+# the port the app listens on (PORT in .env, default 3000) — nginx must forward to the same port
+PORT=$(grep -E '^PORT=' "$APP_DIR/.env" | tail -1 | cut -d= -f2- | tr -dc '0-9')
+PORT=${PORT:-3000}
 
 say "Starting the app with pm2"
 sudo -u $APP_USER bash -c "cd $APP_DIR && (pm2 describe wa-saas >/dev/null 2>&1 && pm2 restart wa-saas || pm2 start server.js --name wa-saas --time) && pm2 save"
@@ -86,7 +90,7 @@ server {
     server_name $DOMAIN;
     client_max_body_size 20m;
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;

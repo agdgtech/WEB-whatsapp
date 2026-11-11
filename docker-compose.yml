@@ -30,7 +30,7 @@ services:
       - traefik.http.routers.wa-saas.rule=Host(`yourdomain.com`)   # <-- CHANGE
       - traefik.http.routers.wa-saas.entrypoints=websecure
       - traefik.http.routers.wa-saas.tls.certresolver=letsencrypt
-      - traefik.http.services.wa-saas.loadbalancer.server.port=3000
+      - traefik.http.services.wa-saas.loadbalancer.server.port=3000   # = the app's PORT (3000 in the image; don't change)
 
 volumes:
   wa-storage:

@@ -73,6 +73,10 @@ Backup (the volume is named `<project name>_wa-storage`; check with `docker volu
 4. **Environment variables** → Edit → add:
    - `SETUP_KEY` = a random secret (protects the first-run setup page)
    - `CRON_KEY` = another random secret
+
+   **Don't add `PORT`** (and don't "Import .env" from `.env.example`, which contains `PORT=3000`):
+   Hostinger assigns the port itself, and a fixed `PORT` can stop the site from loading. After deploying,
+   **Runtime logs** show `Running at http://localhost:<port>`, the port Hostinger gave the app.
 5. **Deploy**. Then open `https://yourdomain.com/admin`, enter the setup key and create your account.
 6. Keep it awake and reconnect numbers: website dashboard → **Advanced** → **Cron Jobs** → every 5 minutes:
    ```
@@ -113,7 +117,7 @@ before the first start there. Your old single-company data is turned into the fi
 | `CRON_KEY` | Enables `/api/cron?key=…` (wake-up + reconnect numbers) |
 | `STORAGE_DIR` | Where data + WhatsApp logins are stored (automatic if empty) |
 | `TRUST_PROXY` | Reverse-proxy hops for real visitor IPs (automatic; Docker/Traefik: `1`) |
-| `PORT` | Port to listen on (default 3000) |
+| `PORT` | Port to listen on (default 3000). A value set by the host wins over `.env`. VPS: the installer points nginx at it (re-run the full install after changing it). Docker: keep 3000. Hostinger web hosting: don't set it |
 | `SUPERADMIN_EMAIL` / `SUPERADMIN_PASSWORD` | Optional: create the super admin on first start instead of the setup page |
 | `MIN_DELAY_MS`, `MAX_DELAY_MS`, `DAILY_LIMIT_PER_SESSION`, `AUTO_TICKETS`, `TICKET_*` | Defaults, see `.env.example` |
 
